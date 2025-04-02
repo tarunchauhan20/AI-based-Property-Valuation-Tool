@@ -1,0 +1,92 @@
+#partial code for the AI-Driven property valuation tool
+#this C++ code provides a baseline for the code functionality providing around 25% of the feature-base
+
+
+CODE:
+
+
+#include <iostream>
+#include <vector>
+#include <cmath>
+#include <iomanip>
+using namespace std;
+
+class PropertyValuation {
+private:
+    vector<vector<double>> features;
+    vector<double> prices;
+    double coef_size, coef_bedrooms, coef_bathrooms, coef_location, coef_age, coef_distance, intercept;
+
+public:
+    PropertyValuation() {
+        // Sample training data (Size in sqft, Bedrooms, Bathrooms, Location Score, Age, Distance to Amenities, Price in INR)
+        features = {{1500, 3, 2, 8, 10, 2}, {1800, 4, 3, 9, 5, 1}, {2100, 3, 2, 7, 15, 3},
+                    {2500, 5, 4, 10, 2, 0.5}, {3000, 4, 3, 9, 8, 1.5}};
+        prices = {25000000, 30000000, 27000000, 40000000, 35000000};
+        trainModel();
+    }
+
+    void trainModel() {
+        // Simple linear regression coefficients (Precomputed for simplicity)
+        coef_size = 10000;
+        coef_bedrooms = 500000;
+        coef_bathrooms = 300000;
+        coef_location = 1000000;
+        coef_age = -200000; // Older houses decrease in value
+        coef_distance = -150000; // Farther from amenities decreases value
+        intercept = 5000000;
+    }
+
+    double predictValue(double size, int bedrooms, int bathrooms, int location_score, int age, double distance) {
+        return coef_size * size + coef_bedrooms * bedrooms + coef_bathrooms * bathrooms +
+               coef_location * location_score + coef_age * age + coef_distance * distance + intercept;
+    }
+};
+
+int main() {
+    PropertyValuation model;
+    double size, distance;
+    int bedrooms, bathrooms, location_score, age;
+
+    cout << "Enter property size in sqft: ";
+    while (!(cin >> size) || size <= 0) {
+        cout << "Invalid input! Enter a positive number: ";
+        cin.clear(); cin.ignore(10000, '\n');
+    }
+
+    cout << "Enter number of bedrooms: ";
+    while (!(cin >> bedrooms) || bedrooms <= 0) {
+        cout << "Invalid input! Enter a positive integer: ";
+        cin.clear(); cin.ignore(10000, '\n');
+    }
+
+    cout << "Enter number of bathrooms: ";
+    while (!(cin >> bathrooms) || bathrooms <= 0) {
+        cout << "Invalid input! Enter a positive integer: ";
+        cin.clear(); cin.ignore(10000, '\n');
+    }
+
+    cout << "Enter location score (1-10): ";
+    while (!(cin >> location_score) || location_score < 1 || location_score > 10) {
+        cout << "Invalid input! Enter a number between 1 and 10: ";
+        cin.clear(); cin.ignore(10000, '\n');
+    }
+
+    cout << "Enter property age in years: ";
+    while (!(cin >> age) || age < 0) {
+        cout << "Invalid input! Enter a non-negative integer: ";
+        cin.clear(); cin.ignore(10000, '\n');
+    }
+
+    cout << "Enter distance to nearest amenities in km: ";
+    while (!(cin >> distance) || distance < 0) {
+        cout << "Invalid input! Enter a non-negative number: ";
+        cin.clear(); cin.ignore(10000, '\n');
+    }
+
+    double estimated_price = model.predictValue(size, bedrooms, bathrooms, location_score, age, distance);
+    cout << fixed << setprecision(2);
+    cout << "\nEstimated Property Value: ₹" << estimated_price << endl;
+
+    return 0;
+}
