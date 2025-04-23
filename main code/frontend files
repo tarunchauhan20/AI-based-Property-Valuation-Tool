@@ -1,0 +1,1823 @@
+client/src/pages/ValuationCalculator.tsx
+
+import { useState, useEffect, useRef } from "react";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { Breadcrumb } from "@/components/ui/breadcrumbs";
+import { Button } from "@/components/ui/button";
+import {
+  Form,
+  FormControl,
+  FormField,
+  FormItem,
+  FormLabel,
+  FormMessage,
+  FormDescription,
+} from "@/components/ui/form";
+import { Input } from "@/components/ui/input";
+import { Slider } from "@/components/ui/slider";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Card, CardContent } from "@/components/ui/card";
+import { Separator } from "@/components/ui/separator";
+import { useToast } from "@/hooks/use-toast";
+import { 
+  ValuationRequest, 
+  valuationRequestSchema, 
+  greaterNoidaLocations, 
+  propertyTypeOptions 
+} from "@shared/schema";
+import { apiRequest } from "@/lib/queryClient";
+import ValuationResult from "../components/ValuationResult";
+import { 
+  Check, 
+  Building2, 
+  Home, 
+  MapPin, 
+  DollarSign, 
+  Bath, 
+  Bed, 
+  Star, 
+  Map, 
+  Ruler, 
+  Clock 
+} from "lucide-react";
+
+// Enhanced ValuationResponse interface to match updated backend
+interface ValuationResponse {
+  estimatedValue: number;
+  priceRange: {
+    min: number;
+    max: number;
+  };
+  factors: {
+    locationImpact: number;
+    ageDepreciation: number;
+    distanceFactor: number;
+    bedroomsBathroomsImpact: number;
+    locationScoreImpact: number;
+    specificLocationImpact: number;
+  };
+  insights: string;
+  distanceFromCenter: number;
+}
+
+// Define a component for the OSM map preview
+const OpenStreetMapPreview = ({ address }: { address: string }) => {
+  const mapContainerRef = useRef<HTMLDivElement>(null);
+  const mapRef = useRef<any>(null);
+  const markerRef = useRef<any>(null);
+  const [coordinates, setCoordinates] = useState<{lat: number, lng: number} | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Function to geocode the address and update the map
+  const updateMap = async (addr: string) => {
+    if (!addr) return;
+    
+    setLoading(true);
+    setError(null);
+    
+    try {
+      // Try to geocode the address using Nominatim OpenStreetMap service
+      const encodedAddress = encodeURIComponent(addr);
+      const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodedAddress}&limit=1`;
+      
+      const response = await fetch(url);
+      if (!response.ok) throw new Error("Failed to geocode address");
+      
+      const data = await response.json();
+      
+      if (data && data.length > 0) {
+        const lat = parseFloat(data[0].lat);
+        const lng = parseFloat(data[0].lon);
+        
+        setCoordinates({ lat, lng });
+      } else {
+        setError("Location not found. Please try a different address.");
+      }
+    } catch (err) {
+      console.error("Geocoding error:", err);
+      setError("Error finding location. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  // Initialize the map when coordinates are available
+  useEffect(() => {
+    if (!coordinates) return;
+    
+    // Load the map if Leaflet is available
+    if (window.L && mapContainerRef.current) {
+      // Create a new map or clear existing one
+      if (mapRef.current) {
+        mapRef.current.remove();
+      }
+      
+      // Initialize map centered on the coordinates
+      mapRef.current = window.L.map(mapContainerRef.current).setView(
+        [coordinates.lat, coordinates.lng], 
+        15
+      );
+      
+      // Add OpenStreetMap tile layer
+      window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+      }).addTo(mapRef.current);
+      
+      // Add marker for the property location
+      if (markerRef.current) {
+        markerRef.current.remove();
+      }
+      
+      markerRef.current = window.L.marker([coordinates.lat, coordinates.lng])
+        .addTo(mapRef.current)
+        .bindPopup("Property Location")
+        .openPopup();
+        
+      // Add a circle to show approximate area
+      window.L.circle([coordinates.lat, coordinates.lng], {
+        color: 'rgba(59, 130, 246, 0.5)',
+        fillColor: 'rgba(59, 130, 246, 0.1)',
+        fillOpacity: 0.5,
+        radius: 300 // 300 meters
+      }).addTo(mapRef.current);
+    }
+  }, [coordinates]);
+  
+  // Update map when address changes
+  useEffect(() => {
+    if (address) {
+      updateMap(address);
+    }
+  }, [address]);
+  
+  // Load Leaflet script if not present
+  useEffect(() => {
+    if (window.L) return;
+    
+    // Load Leaflet CSS
+    const linkElement = document.createElement('link');
+    linkElement.rel = 'stylesheet';
+    linkElement.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+    linkElement.integrity = 'sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=';
+    linkElement.crossOrigin = '';
+    document.head.appendChild(linkElement);
+    
+    // Load Leaflet JS
+    const scriptElement = document.createElement('script');
+    scriptElement.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+    scriptElement.integrity = 'sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=';
+    scriptElement.crossOrigin = '';
+    document.body.appendChild(scriptElement);
+    
+    scriptElement.onload = () => {
+      if (address) {
+        updateMap(address);
+      }
+    };
+  }, []);
+  
+  return (
+    <div className="mt-4">
+      <div 
+        ref={mapContainerRef} 
+        className="w-full h-[200px] rounded-md border overflow-hidden bg-neutral-100"
+      ></div>
+      
+      {loading && (
+        <div className="text-center py-2 text-sm text-neutral-600">
+          Finding location...
+        </div>
+      )}
+      
+      {error && (
+        <div className="text-center py-2 text-sm text-red-600">
+          {error}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const ValuationCalculator = () => {
+  const { toast } = useToast();
+  const [loading, setLoading] = useState(false);
+  const [valuationResult, setValuationResult] = useState<ValuationResponse | null>(null);
+  const [currentTab, setCurrentTab] = useState("basic");
+  
+  const form = useForm<ValuationRequest>({
+    resolver: zodResolver(valuationRequestSchema),
+    defaultValues: {
+      name: "",
+      location: "city",
+      size: 1000,
+      age: 5,
+      basePricePerSqft: 2500,
+      address: "Sector 1, Greater Noida, India",
+      // New fields
+      bedrooms: 2,
+      bathrooms: 2,
+      locationScore: 7,
+      specificLocation: "sector_1",
+      propertyType: "apartment"
+    }
+  });
+  
+  const onSubmit = async (data: ValuationRequest) => {
+    setLoading(true);
+    try {
+      const response = await apiRequest("POST", "/api/valuation", data);
+      const result = await response.json();
+      setValuationResult(result);
+      
+      toast({
+        title: "Valuation Complete",
+        description: "Your property valuation has been calculated successfully."
+      });
+    } catch (error) {
+      console.error("Valuation error:", error);
+      toast({
+        title: "Valuation Failed",
+        description: error instanceof Error ? error.message : "Failed to calculate property value. Please try again.",
+        variant: "destructive"
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  const resetForm = () => {
+    setValuationResult(null);
+    form.reset();
+    setCurrentTab("basic");
+  };
+  
+  // Get current address value for the map preview
+  const address = form.watch("address");
+  
+  return (
+    <div className="container mx-auto px-4 py-6">
+      <Breadcrumb
+        className="mb-6"
+        segments={[
+          { name: "Valuation Calculator", href: "/valuation" }
+        ]}
+      />
+      
+      <div className="max-w-4xl mx-auto">
+        <div className="bg-white rounded-xl shadow-sm overflow-hidden">
+          <div className="p-6 md:p-8 border-b border-neutral-200">
+            <h1 className="font-poppins font-bold text-2xl text-neutral-800 mb-2">
+              AI-Powered Property Valuation
+            </h1>
+            <p className="text-neutral-600">
+              Get an accurate estimate for your property value based on location, size, age, and local market factors
+            </p>
+          </div>
+          
+          <div className="p-6 md:p-8">
+            {!valuationResult ? (
+              <Form {...form}>
+                <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
+                  <Tabs value={currentTab} onValueChange={setCurrentTab}>
+                    <TabsList className="grid grid-cols-3 w-full">
+                      <TabsTrigger value="basic">Basic Details</TabsTrigger>
+                      <TabsTrigger value="features">Property Features</TabsTrigger>
+                      <TabsTrigger value="location">Location Details</TabsTrigger>
+                    </TabsList>
+                    
+                    {/* Basic Details Tab */}
+                    <TabsContent value="basic" className="space-y-6 pt-4">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div className="space-y-4">
+                          <FormField
+                            control={form.control}
+                            name="name"
+                            render={({ field }) => (
+                              <FormItem>
+                                <FormLabel>Property Name</FormLabel>
+                                <FormControl>
+                                  <Input
+                                    placeholder="e.g., Green View Apartment"
+                                    {...field}
+                                  />
+                                </FormControl>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+                          
+                          <FormField
+                            control={form.control}
+                            name="propertyType"
+                            render={({ field }) => (
+                              <FormItem>
+                                <FormLabel>Property Type</FormLabel>
+                                <Select 
+                                  onValueChange={field.onChange} 
+                                  defaultValue={field.value}
+                                >
+                                  <FormControl>
+                                    <SelectTrigger>
+                                      <SelectValue placeholder="Select property type" />
+                                    </SelectTrigger>
+                                  </FormControl>
+                                  <SelectContent>
+                                    {propertyTypeOptions.map(option => (
+                                      <SelectItem key={option.value} value={option.value}>
+                                        {option.label}
+                                      </SelectItem>
+                                    ))}
+                                  </SelectContent>
+                                </Select>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+                          
+                          <FormField
+                            control={form.control}
+                            name="size"
+                            render={({ field }) => (
+                              <FormItem>
+                                <FormLabel>Size (sq ft)</FormLabel>
+                                <FormControl>
+                                  <Input
+                                    type="number"
+                                    min="100"
+                                    step="10"
+                                    {...field}
+                                    onChange={(e) => field.onChange(Number(e.target.value))}
+                                  />
+                                </FormControl>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+                        </div>
+                        
+                        <div className="space-y-4">
+                          <FormField
+                            control={form.control}
+                            name="age"
+                            render={({ field }) => (
+                              <FormItem>
+                                <FormLabel>Age (years)</FormLabel>
+                                <FormControl>
+                                  <Input
+                                    type="number"
+                                    min="0"
+                                    {...field}
+                                    onChange={(e) => field.onChange(Number(e.target.value))}
+                                  />
+                                </FormControl>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+                          
+                          <FormField
+                            control={form.control}
+                            name="basePricePerSqft"
+                            render={({ field }) => (
+                              <FormItem>
+                                <FormLabel>Base Price per sq ft (₹)</FormLabel>
+                                <FormControl>
+                                  <Input
+                                    type="number"
+                                    min="500"
+                                    step="100"
+                                    {...field}
+                                    onChange={(e) => field.onChange(Number(e.target.value))}
+                                  />
+                                </FormControl>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+                          
+                          <div className="flex gap-4">
+                            <Button 
+                              type="button" 
+                              variant="outline" 
+                              className="flex-1"
+                              onClick={() => resetForm()}
+                            >
+                              Reset
+                            </Button>
+                            <Button 
+                              type="button" 
+                              className="flex-1"
+                              onClick={() => setCurrentTab("features")}
+                            >
+                              Next: Features
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    </TabsContent>
+                    
+                    {/* Property Features Tab */}
+                    <TabsContent value="features" className="space-y-6 pt-4">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div className="space-y-4">
+                          <FormField
+                            control={form.control}
+                            name="bedrooms"
+                            render={({ field }) => (
+                              <FormItem>
+                                <FormLabel>Number of Bedrooms</FormLabel>
+                                <FormControl>
+                                  <Input
+                                    type="number"
+                                    min="0"
+                                    max="10"
+                                    {...field}
+                                    onChange={(e) => field.onChange(Number(e.target.value))}
+                                  />
+                                </FormControl>
+                                <FormDescription>
+                                  More bedrooms generally increase property value
+                                </FormDescription>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+                          
+                          <FormField
+                            control={form.control}
+                            name="bathrooms"
+                            render={({ field }) => (
+                              <FormItem>
+                                <FormLabel>Number of Bathrooms</FormLabel>
+                                <FormControl>
+                                  <Input
+                                    type="number"
+                                    min="0"
+                                    max="10"
+                                    {...field}
+                                    onChange={(e) => field.onChange(Number(e.target.value))}
+                                  />
+                                </FormControl>
+                                <FormDescription>
+                                  Additional bathrooms add convenience and value
+                                </FormDescription>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+                        </div>
+                        
+                        <div className="space-y-4">
+                          <FormField
+                            control={form.control}
+                            name="locationScore"
+                            render={({ field }) => (
+                              <FormItem>
+                                <FormLabel>Location Quality Score (1-10)</FormLabel>
+                                <FormControl>
+                                  <div className="pt-6">
+                                    <Slider
+                                      min={1}
+                                      max={10}
+                                      step={1}
+                                      defaultValue={[field.value || 5]}
+                                      onValueChange={(vals) => field.onChange(vals[0])}
+                                    />
+                                  </div>
+                                </FormControl>
+                                <div className="flex justify-between text-xs text-neutral-500 mt-2">
+                                  <span>Basic (1)</span>
+                                  <span>Average (5)</span>
+                                  <span>Premium (10)</span>
+                                </div>
+                                <FormDescription className="mt-4">
+                                  This score reflects the quality of amenities, safety, convenience, and other local factors
+                                </FormDescription>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+                          
+                          <div className="flex gap-4 mt-8">
+                            <Button 
+                              type="button" 
+                              variant="outline" 
+                              className="flex-1"
+                              onClick={() => setCurrentTab("basic")}
+                            >
+                              Previous
+                            </Button>
+                            <Button 
+                              type="button" 
+                              className="flex-1"
+                              onClick={() => setCurrentTab("location")}
+                            >
+                              Next: Location
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    </TabsContent>
+                    
+                    {/* Location Details Tab */}
+                    <TabsContent value="location" className="space-y-6 pt-4">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div className="space-y-4">
+                          <FormField
+                            control={form.control}
+                            name="location"
+                            render={({ field }) => (
+                              <FormItem>
+                                <FormLabel>Location Type</FormLabel>
+                                <Select 
+                                  onValueChange={field.onChange} 
+                                  defaultValue={field.value}
+                                >
+                                  <FormControl>
+                                    <SelectTrigger>
+                                      <SelectValue placeholder="Select location type" />
+                                    </SelectTrigger>
+                                  </FormControl>
+                                  <SelectContent>
+                                    <SelectItem value="city">City</SelectItem>
+                                    <SelectItem value="suburb">Suburb</SelectItem>
+                                    <SelectItem value="rural">Rural</SelectItem>
+                                  </SelectContent>
+                                </Select>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+                          
+                          <FormField
+                            control={form.control}
+                            name="specificLocation"
+                            render={({ field }) => (
+                              <FormItem>
+                                <FormLabel>Greater Noida Area</FormLabel>
+                                <Select 
+                                  onValueChange={field.onChange} 
+                                  defaultValue={field.value || ''}
+                                >
+                                  <FormControl>
+                                    <SelectTrigger>
+                                      <SelectValue placeholder="Select area in Greater Noida" />
+                                    </SelectTrigger>
+                                  </FormControl>
+                                  <SelectContent>
+                                    {greaterNoidaLocations.map(location => (
+                                      <SelectItem key={location.value} value={location.value}>
+                                        {location.label}
+                                      </SelectItem>
+                                    ))}
+                                  </SelectContent>
+                                </Select>
+                                <FormDescription>
+                                  Different areas in Greater Noida have different market valuations
+                                </FormDescription>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+                        </div>
+                        
+                        <div className="space-y-4">
+                          <FormField
+                            control={form.control}
+                            name="address"
+                            render={({ field }) => (
+                              <FormItem>
+                                <FormLabel>Full Address</FormLabel>
+                                <FormControl>
+                                  <Input
+                                    placeholder="e.g., Sector 25, Greater Noida, India"
+                                    {...field}
+                                  />
+                                </FormControl>
+                                <FormMessage />
+                                <FormDescription>
+                                  This address will be used to calculate distance factors from key points
+                                </FormDescription>
+                              </FormItem>
+                            )}
+                          />
+                          
+                          {/* OpenStreetMap Preview */}
+                          <div className="pt-1">
+                            <FormLabel className="text-sm">Map Preview</FormLabel>
+                            <OpenStreetMapPreview address={address} />
+                          </div>
+                          
+                          <div className="flex gap-4 mt-2">
+                            <Button 
+                              type="button" 
+                              variant="outline" 
+                              className="flex-1"
+                              onClick={() => setCurrentTab("features")}
+                            >
+                              Previous
+                            </Button>
+                            <Button 
+                              type="submit"
+                              className="flex-1"
+                              disabled={loading}
+                            >
+                              {loading ? (
+                                <>
+                                  <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                  </svg>
+                                  Processing...
+                                </>
+                              ) : (
+                                "Calculate Value"
+                              )}
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    </TabsContent>
+                  </Tabs>
+                </form>
+              </Form>
+            ) : (
+              <ValuationResult 
+                result={valuationResult} 
+                onReset={resetForm} 
+                formData={form.getValues()}
+              />
+            )}
+          </div>
+        </div>
+        
+        {/* How It Works Section */}
+        <div className="mt-8 bg-white rounded-xl shadow-sm p-6 md:p-8">
+          <h2 className="font-poppins font-semibold text-xl text-neutral-800 mb-4">
+            How Our Valuation Works
+          </h2>
+          
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div className="flex flex-col items-center text-center p-4">
+              <div className="w-16 h-16 flex items-center justify-center bg-primary-100 text-primary-600 rounded-full mb-4">
+                <MapPin className="h-6 w-6" />
+              </div>
+              <h3 className="font-medium text-neutral-800 mb-2">Location Analysis</h3>
+              <p className="text-sm text-neutral-600">
+                We analyze the property location using OpenStreetMap data and calculate distance from key landmarks.
+              </p>
+            </div>
+            
+            <div className="flex flex-col items-center text-center p-4">
+              <div className="w-16 h-16 flex items-center justify-center bg-primary-100 text-primary-600 rounded-full mb-4">
+                <Building2 className="h-6 w-6" />
+              </div>
+              <h3 className="font-medium text-neutral-800 mb-2">Property Metrics</h3>
+              <p className="text-sm text-neutral-600">
+                Size, age, bedrooms, bathrooms, and other property features are factored into our comprehensive calculation.
+              </p>
+            </div>
+            
+            <div className="flex flex-col items-center text-center p-4">
+              <div className="w-16 h-16 flex items-center justify-center bg-primary-100 text-primary-600 rounded-full mb-4">
+                <LineChart className="h-6 w-6" />
+              </div>
+              <h3 className="font-medium text-neutral-800 mb-2">Market Trends</h3>
+              <p className="text-sm text-neutral-600">
+                Our AI analyzes current market trends and recent sales data in Greater Noida for accurate valuation.
+              </p>
+            </div>
+          </div>
+          
+          <div className="mt-8 p-4 bg-neutral-50 rounded-lg border border-neutral-200">
+            <div className="flex items-start">
+              <Info className="text-primary-500 mt-1 mr-3 flex-shrink-0" />
+              <p className="text-sm text-neutral-600">
+                Our valuation algorithm uses the Haversine distance formula to calculate property distance from key landmarks, which affects the final valuation. We also apply Greater Noida specific multipliers based on location type and local market conditions.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Icons
+const LineChart = (props: React.SVGProps<SVGSVGElement>) => (
+  <svg {...props} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M3 3v18h18"/>
+    <path d="m19 9-5 5-4-4-3 3"/>
+  </svg>
+);
+
+const Info = (props: React.SVGProps<SVGSVGElement>) => (
+  <svg {...props} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="10"/>
+    <path d="M12 16v-4"/>
+    <path d="M12 8h.01"/>
+  </svg>
+);
+
+export default ValuationCalculator;
+
+
+client/src/components/ValuationResult.tsx
+
+import { Button } from "@/components/ui/button";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { ValuationRequest, greaterNoidaLocations, propertyTypeOptions } from "@shared/schema";
+import { Download, MapPin, RefreshCw, Home, Bed, Bath, MapIcon, Building, Star } from "lucide-react";
+import { formatCurrency } from "@/lib/utils";
+import { Icons } from "./Icons";
+import { useState, useEffect, useRef } from "react";
+
+// Updated interface to match new valuation factors
+interface ValuationResultProps {
+  result: {
+    estimatedValue: number;
+    priceRange: {
+      min: number;
+      max: number;
+    };
+    factors: {
+      locationImpact: number;
+      ageDepreciation: number;
+      distanceFactor: number;
+      bedroomsBathroomsImpact: number;
+      locationScoreImpact: number;
+      specificLocationImpact: number;
+    };
+    insights: string;
+    distanceFromCenter: number;
+  };
+  onReset: () => void;
+  formData: ValuationRequest;
+}
+
+const ValuationResult = ({ result, onReset, formData }: ValuationResultProps) => {
+  const [activeTab, setActiveTab] = useState("summary");
+  const mapContainerRef = useRef<HTMLDivElement>(null);
+  const mapRef = useRef<any>(null);
+  
+  // Handle download report
+  const handleDownloadReport = () => {
+    // Find location name
+    const locationInfo = formData.specificLocation ? 
+      greaterNoidaLocations.find(loc => loc.value === formData.specificLocation) : null;
+    
+    // Find property type name
+    const propertyTypeInfo = formData.propertyType ?
+      propertyTypeOptions.find(type => type.value === formData.propertyType) : null;
+      
+    // Create a detailed text report with all factors
+    const report = `
+    PROPERTY VALUATION REPORT
+    -------------------------------
+    Property: ${formData.name}
+    Address: ${formData.address}
+    Date: ${new Date().toLocaleDateString()}
+    
+    PROPERTY DETAILS
+    -------------------------------
+    Location Type: ${formData.location}
+    ${locationInfo ? `Greater Noida Area: ${locationInfo.label}` : ''}
+    ${propertyTypeInfo ? `Property Type: ${propertyTypeInfo.label}` : ''}
+    Size: ${formData.size} sq ft
+    Age: ${formData.age} years
+    Base Price per sq ft: ₹${formData.basePricePerSqft}
+    ${formData.bedrooms ? `Bedrooms: ${formData.bedrooms}` : ''}
+    ${formData.bathrooms ? `Bathrooms: ${formData.bathrooms}` : ''}
+    ${formData.locationScore ? `Location Quality Score: ${formData.locationScore}/10` : ''}
+    
+    VALUATION RESULT
+    -------------------------------
+    Estimated Value: ₹${result.estimatedValue.toLocaleString()}
+    Value Range: ₹${result.priceRange.min.toLocaleString()} - ₹${result.priceRange.max.toLocaleString()}
+    
+    VALUATION FACTORS
+    -------------------------------
+    Location Type Impact: ${result.factors.locationImpact >= 0 ? '+' : ''}₹${result.factors.locationImpact.toLocaleString()}
+    Age Depreciation: ${result.factors.ageDepreciation >= 0 ? '+' : ''}₹${result.factors.ageDepreciation.toLocaleString()}
+    Distance Factor: ${result.factors.distanceFactor >= 0 ? '+' : ''}₹${result.factors.distanceFactor.toLocaleString()}
+    ${result.factors.bedroomsBathroomsImpact ? `Bedrooms & Bathrooms Impact: ${result.factors.bedroomsBathroomsImpact >= 0 ? '+' : ''}₹${result.factors.bedroomsBathroomsImpact.toLocaleString()}` : ''}
+    ${result.factors.locationScoreImpact ? `Location Quality Impact: ${result.factors.locationScoreImpact >= 0 ? '+' : ''}₹${result.factors.locationScoreImpact.toLocaleString()}` : ''}
+    ${result.factors.specificLocationImpact ? `Area-Specific Impact: ${result.factors.specificLocationImpact >= 0 ? '+' : ''}₹${result.factors.specificLocationImpact.toLocaleString()}` : ''}
+    Distance from Greater Noida Center: ${result.distanceFromCenter.toFixed(2)} km
+    
+    AI INSIGHTS
+    -------------------------------
+    ${result.insights}
+    
+    This report was generated by PropertyValuator AI.
+    `;
+    
+    // Create a blob and download
+    const blob = new Blob([report], { type: 'text/plain' });
+    const href = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = href;
+    link.download = `${formData.name.replace(/\s+/g, '_')}_Valuation_Report.txt`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(href);
+  };
+  
+  // Initialize map when component loads
+  useEffect(() => {
+    // Load map when on the location tab
+    if (activeTab === 'location' && !mapRef.current && window.L && mapContainerRef.current) {
+      // Default to Greater Noida center if no coordinates
+      const lat = 28.4744;
+      const lon = 77.5040;
+      
+      // Initialize map
+      mapRef.current = window.L.map(mapContainerRef.current).setView([lat, lon], 13);
+      
+      // Add OpenStreetMap tile layer
+      window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+      }).addTo(mapRef.current);
+      
+      // Use Greater Noida center as default coordinates
+      // The property's actual coordinates would be available in a real scenario from geocoding
+      // For simulation purposes, we use a position slightly offset from center
+      const propertyLat = 28.4744 + (Math.random() * 0.02 - 0.01); // Random offset for demo
+      const propertyLon = 77.5040 + (Math.random() * 0.02 - 0.01); // Random offset for demo
+      
+      // Add property marker
+      const propertyMarker = window.L.marker([propertyLat, propertyLon])
+        .addTo(mapRef.current)
+        .bindPopup(`<b>${formData.name}</b><br>${formData.address}<br>Value: ₹${result.estimatedValue.toLocaleString()}`)
+        .openPopup();
+        
+      // Center map on property
+      mapRef.current.setView([propertyLat, propertyLon], 15);
+      
+      // Add a circle to show property area
+      window.L.circle([propertyLat, propertyLon], {
+        color: 'rgba(59, 130, 246, 0.5)',
+        fillColor: 'rgba(59, 130, 246, 0.1)',
+        fillOpacity: 0.5,
+        radius: 300 // 300 meters
+      }).addTo(mapRef.current);
+      
+      // Add Greater Noida center marker
+      window.L.marker([28.4744, 77.5040], {
+        icon: window.L.divIcon({
+          className: 'city-center-marker',
+          html: `<div class="flex items-center justify-center w-8 h-8 bg-red-500 text-white rounded-full shadow-lg">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 22s-8-4.5-8-11.8a8 8 0 0 1 16 0c0 7.3-8 11.8-8 11.8z"/>
+                    <circle cx="12" cy="10" r="3"/>
+                  </svg>
+                </div>`,
+          iconSize: [32, 32],
+          iconAnchor: [16, 32]
+        })
+      }).addTo(mapRef.current)
+        .bindPopup('Greater Noida Center');
+    }
+  }, [activeTab, formData]);
+  
+  // Load Leaflet if needed when tab changes to location
+  useEffect(() => {
+    if (activeTab !== 'location') return;
+    
+    // If Leaflet is already loaded, initialize map
+    if (window.L) {
+      if (mapRef.current) {
+        mapRef.current.invalidateSize();
+      }
+      return;
+    }
+    
+    // Load Leaflet CSS
+    const linkElement = document.createElement('link');
+    linkElement.rel = 'stylesheet';
+    linkElement.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+    linkElement.integrity = 'sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=';
+    linkElement.crossOrigin = '';
+    document.head.appendChild(linkElement);
+    
+    // Load Leaflet JS
+    const scriptElement = document.createElement('script');
+    scriptElement.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+    scriptElement.integrity = 'sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=';
+    scriptElement.crossOrigin = '';
+    document.body.appendChild(scriptElement);
+  }, [activeTab]);
+  
+  // Get Greater Noida location name if available
+  const locationName = formData.specificLocation ? 
+    greaterNoidaLocations.find(loc => loc.value === formData.specificLocation)?.label : "Not specified";
+  
+  // Get property type name if available
+  const propertyTypeName = formData.propertyType ?
+    propertyTypeOptions.find(type => type.value === formData.propertyType)?.label : "Not specified";
+  
+  return (
+    <div className="bg-neutral-50 rounded-lg p-4 md:p-6">
+      <div className="text-center mb-6">
+        <span className="inline-block p-3 rounded-full bg-secondary-100 text-secondary-500 mb-4">
+          <Icons.check className="h-6 w-6" />
+        </span>
+        <h3 className="font-poppins font-semibold text-xl text-neutral-800 mb-2">Property Valuation Complete</h3>
+        <p className="text-neutral-600">Based on the provided details and our AI analysis</p>
+      </div>
+      
+      <div className="flex flex-col md:flex-row justify-between items-center p-6 bg-white rounded-lg shadow-sm mb-6">
+        <div>
+          <span className="text-neutral-500 text-sm">Estimated Value</span>
+          <div className="font-poppins font-bold text-3xl text-primary-600 mt-1">
+            {formatCurrency(result.estimatedValue)}
+          </div>
+        </div>
+        <div className="mt-4 md:mt-0 text-center md:text-right">
+          <div className="text-sm text-neutral-500 mb-1">Price Range</div>
+          <div className="font-medium">
+            {formatCurrency(result.priceRange.min)} - {formatCurrency(result.priceRange.max)}
+          </div>
+        </div>
+      </div>
+      
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="mb-6">
+        <TabsList className="grid grid-cols-3 w-full mb-4">
+          <TabsTrigger value="summary">Summary</TabsTrigger>
+          <TabsTrigger value="details">All Factors</TabsTrigger>
+          <TabsTrigger value="location">Map View</TabsTrigger>
+        </TabsList>
+        
+        {/* Summary Tab */}
+        <TabsContent value="summary" className="space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+            <div className="bg-white p-4 rounded-lg shadow-sm">
+              <div className="text-sm text-neutral-500 mb-1">Location Impact</div>
+              <div className="font-medium text-neutral-800">
+                {result.factors.locationImpact >= 0 ? '+' : ''}{formatCurrency(result.factors.locationImpact)}
+              </div>
+              <div className="text-xs text-neutral-500 mt-1">
+                {formData.location === 'city' ? 'City location adds premium' : 
+                 formData.location === 'suburb' ? 'Suburb location impact' : 'Rural location factor'}
+              </div>
+            </div>
+            <div className="bg-white p-4 rounded-lg shadow-sm">
+              <div className="text-sm text-neutral-500 mb-1">Age Depreciation</div>
+              <div className="font-medium text-neutral-800">
+                {result.factors.ageDepreciation >= 0 ? '+' : ''}{formatCurrency(result.factors.ageDepreciation)}
+              </div>
+              <div className="text-xs text-neutral-500 mt-1">
+                Based on {formData.age} years age
+              </div>
+            </div>
+            <div className="bg-white p-4 rounded-lg shadow-sm">
+              <div className="text-sm text-neutral-500 mb-1">Distance Factor</div>
+              <div className="font-medium text-neutral-800">
+                {result.factors.distanceFactor >= 0 ? '+' : ''}{formatCurrency(result.factors.distanceFactor)}
+              </div>
+              <div className="text-xs text-neutral-500 mt-1">
+                {result.distanceFromCenter.toFixed(1)} km from center
+              </div>
+            </div>
+          </div>
+          
+          <div className="bg-white p-4 rounded-lg shadow-sm">
+            <h4 className="font-medium text-neutral-700 mb-3">AI Insights</h4>
+            <p className="text-neutral-600 text-sm">{result.insights}</p>
+          </div>
+        </TabsContent>
+        
+        {/* Detailed Factors Tab */}
+        <TabsContent value="details" className="space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+            <div className="bg-white p-4 rounded-lg shadow-sm">
+              <div className="flex items-center mb-2">
+                <Home className="h-5 w-5 text-primary-500 mr-2" />
+                <div className="text-sm font-medium text-neutral-700">Property Details</div>
+              </div>
+              <div className="space-y-2">
+                <div className="flex justify-between text-sm">
+                  <span className="text-neutral-500">Property Type:</span>
+                  <span className="font-medium">{propertyTypeName}</span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span className="text-neutral-500">Size:</span>
+                  <span className="font-medium">{formData.size} sq ft</span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span className="text-neutral-500">Age:</span>
+                  <span className="font-medium">{formData.age} years</span>
+                </div>
+                {formData.bedrooms !== undefined && (
+                  <div className="flex justify-between text-sm">
+                    <span className="text-neutral-500">Bedrooms:</span>
+                    <span className="font-medium">{formData.bedrooms}</span>
+                  </div>
+                )}
+                {formData.bathrooms !== undefined && (
+                  <div className="flex justify-between text-sm">
+                    <span className="text-neutral-500">Bathrooms:</span>
+                    <span className="font-medium">{formData.bathrooms}</span>
+                  </div>
+                )}
+              </div>
+            </div>
+            
+            <div className="bg-white p-4 rounded-lg shadow-sm">
+              <div className="flex items-center mb-2">
+                <MapPin className="h-5 w-5 text-primary-500 mr-2" />
+                <div className="text-sm font-medium text-neutral-700">Location Details</div>
+              </div>
+              <div className="space-y-2">
+                <div className="flex justify-between text-sm">
+                  <span className="text-neutral-500">Location Type:</span>
+                  <span className="font-medium capitalize">{formData.location}</span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span className="text-neutral-500">Greater Noida Area:</span>
+                  <span className="font-medium">{locationName}</span>
+                </div>
+                {formData.locationScore !== undefined && (
+                  <div className="flex justify-between text-sm">
+                    <span className="text-neutral-500">Location Quality:</span>
+                    <span className="font-medium">{formData.locationScore}/10</span>
+                  </div>
+                )}
+                <div className="flex justify-between text-sm">
+                  <span className="text-neutral-500">Distance from Center:</span>
+                  <span className="font-medium">{result.distanceFromCenter.toFixed(1)} km</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          <div className="bg-white p-4 rounded-lg shadow-sm">
+            <div className="flex items-center mb-3">
+              <Star className="h-5 w-5 text-primary-500 mr-2" />
+              <div className="text-sm font-medium text-neutral-700">All Valuation Factors</div>
+            </div>
+            
+            <div className="space-y-3">
+              <div className="flex justify-between items-center py-2 border-b border-neutral-100">
+                <div className="text-sm text-neutral-600">Location Type Impact</div>
+                <div className="font-medium text-neutral-800">
+                  {result.factors.locationImpact >= 0 ? '+' : ''}{formatCurrency(result.factors.locationImpact)}
+                </div>
+              </div>
+              
+              <div className="flex justify-between items-center py-2 border-b border-neutral-100">
+                <div className="text-sm text-neutral-600">Age Depreciation</div>
+                <div className="font-medium text-neutral-800">
+                  {result.factors.ageDepreciation >= 0 ? '+' : ''}{formatCurrency(result.factors.ageDepreciation)}
+                </div>
+              </div>
+              
+              <div className="flex justify-between items-center py-2 border-b border-neutral-100">
+                <div className="text-sm text-neutral-600">Distance Factor</div>
+                <div className="font-medium text-neutral-800">
+                  {result.factors.distanceFactor >= 0 ? '+' : ''}{formatCurrency(result.factors.distanceFactor)}
+                </div>
+              </div>
+              
+              {result.factors.bedroomsBathroomsImpact !== undefined && (
+                <div className="flex justify-between items-center py-2 border-b border-neutral-100">
+                  <div className="text-sm text-neutral-600">Bedrooms & Bathrooms Impact</div>
+                  <div className="font-medium text-neutral-800">
+                    {result.factors.bedroomsBathroomsImpact >= 0 ? '+' : ''}{formatCurrency(result.factors.bedroomsBathroomsImpact)}
+                  </div>
+                </div>
+              )}
+              
+              {result.factors.locationScoreImpact !== undefined && (
+                <div className="flex justify-between items-center py-2 border-b border-neutral-100">
+                  <div className="text-sm text-neutral-600">Location Quality Impact</div>
+                  <div className="font-medium text-neutral-800">
+                    {result.factors.locationScoreImpact >= 0 ? '+' : ''}{formatCurrency(result.factors.locationScoreImpact)}
+                  </div>
+                </div>
+              )}
+              
+              {result.factors.specificLocationImpact !== undefined && (
+                <div className="flex justify-between items-center py-2 border-b border-neutral-100">
+                  <div className="text-sm text-neutral-600">Area-Specific Impact</div>
+                  <div className="font-medium text-neutral-800">
+                    {result.factors.specificLocationImpact >= 0 ? '+' : ''}{formatCurrency(result.factors.specificLocationImpact)}
+                  </div>
+                </div>
+              )}
+              
+              <div className="flex justify-between items-center py-2 font-medium">
+                <div className="text-neutral-700">Total Estimated Value</div>
+                <div className="text-primary-600">{formatCurrency(result.estimatedValue)}</div>
+              </div>
+            </div>
+          </div>
+        </TabsContent>
+        
+        {/* Map View Tab */}
+        <TabsContent value="location">
+          <div className="bg-white p-4 rounded-lg shadow-sm">
+            <div className="flex items-center mb-3">
+              <MapIcon className="h-5 w-5 text-primary-500 mr-2" />
+              <div className="text-sm font-medium text-neutral-700">Property Location</div>
+            </div>
+            
+            <div className="text-sm text-neutral-600 mb-3">
+              {formData.address}
+            </div>
+            
+            <div 
+              ref={mapContainerRef} 
+              className="w-full h-[300px] rounded-md border overflow-hidden"
+            ></div>
+            
+            <div className="mt-3 text-xs text-neutral-500">
+              Distance from Greater Noida center: {result.distanceFromCenter.toFixed(1)} km
+            </div>
+          </div>
+        </TabsContent>
+      </Tabs>
+      
+      <div className="flex flex-col sm:flex-row items-center justify-between space-y-3 sm:space-y-0 sm:space-x-3">
+        <Button 
+          onClick={onReset} 
+          variant="outline" 
+          className="w-full sm:w-auto"
+        >
+          <RefreshCw className="mr-2 h-4 w-4" />
+          Re-calculate
+        </Button>
+        <Button 
+          onClick={handleDownloadReport} 
+          variant="secondary" 
+          className="w-full sm:w-auto"
+        >
+          <Download className="mr-2 h-4 w-4" />
+          Download Report
+        </Button>
+      </div>
+    </div>
+  );
+};
+
+export default ValuationResult;
+
+
+client/src/pages/PropertyComparison.tsx
+import { useState } from "react";
+import { Breadcrumb } from "@/components/ui/breadcrumbs";
+import { Button } from "@/components/ui/button";
+import { useQuery } from "@tanstack/react-query";
+import { Property } from "@shared/schema";
+import { 
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger
+} from "@/components/ui/dialog";
+import { Building, Building2, Tally4 } from "lucide-react";
+import { PropertyCard } from "../components/PropertyCard";
+import { useToast } from "@/hooks/use-toast";
+
+const PropertyComparison = () => {
+  const { toast } = useToast();
+  const [selectedProperties, setSelectedProperties] = useState<Property[]>([]);
+  const [selectingIndex, setSelectingIndex] = useState<number | null>(null);
+  
+  // Fetch all properties
+  const { data: properties, isLoading, error } = useQuery({
+    queryKey: ['/api/properties'],
+    queryFn: () => fetch('/api/properties').then(res => res.json()),
+  });
+  
+  const selectProperty = (property: Property) => {
+    if (selectingIndex === null) return;
+    
+    const newSelected = [...selectedProperties];
+    newSelected[selectingIndex] = property;
+    setSelectedProperties(newSelected);
+    setSelectingIndex(null);
+    
+    toast({
+      title: "Property Selected",
+      description: `${property.name} has been added to comparison.`
+    });
+  };
+  
+  const removeProperty = (index: number) => {
+    const newSelected = [...selectedProperties];
+    newSelected[index] = undefined as any;
+    setSelectedProperties(newSelected);
+  };
+  
+  // Get recommendation based on selected properties
+  const getRecommendation = (index: number) => {
+    if (!selectedProperties[index]) return "-";
+    
+    const property = selectedProperties[index];
+    let score = 0;
+    
+    // Enhanced recommendation logic based on multiple factors
+    
+    // Age factor (newer properties score higher)
+    if (property.age === 0) {
+      score += 4; // New construction
+    } else if (property.age < 3) {
+      score += 3; // Nearly new
+    } else if (property.age < 7) {
+      score += 2; // Moderately aged
+    } else if (property.age < 12) {
+      score += 1; // Older property
+    }
+    
+    // Location factor
+    if (property.location === "city") {
+      score += 3;
+    } else if (property.location === "suburb") {
+      score += 2;
+    } else {
+      score += 1; // Rural
+    }
+    
+    // Property type factor
+    if (property.propertyType === "apartment" || property.propertyType === "house") {
+      score += 2; // Higher demand for residential units
+    } else if (property.propertyType === "villa") {
+      score += 3; // Premium property type
+    } else if (property.propertyType === "commercial") {
+      score += 2; // Commercial properties have different investment profiles
+    }
+    
+    // Location score impact 
+    if (property.locationScore != null) {
+      if (property.locationScore >= 8) {
+        score += 3; // Excellent location
+      } else if (property.locationScore >= 6) {
+        score += 2; // Good location
+      } else if (property.locationScore >= 4) {
+        score += 1; // Average location
+      }
+    }
+    
+    // Price per sqft comparison to market average
+    const pricePerSqft = Number(property.estimatedValue) / Number(property.size);
+    const avgPricePerSqft = 4850; // From market insights
+    
+    if (pricePerSqft < avgPricePerSqft * 0.9) {
+      score += 2; // Potentially undervalued
+    } else if (pricePerSqft > avgPricePerSqft * 1.1) {
+      score -= 1; // Potentially overvalued
+    }
+    
+    // Return recommendation based on total score
+    if (score >= 10) {
+      return "Excellent Investment";
+    } else if (score >= 8) {
+      return "Very Good Investment";
+    } else if (score >= 6) {
+      return "Good Investment";
+    } else if (score >= 4) {
+      return "Fair Investment";
+    } else {
+      return "Consider Carefully";
+    }
+  };
+  
+  return (
+    <div className="container mx-auto px-4 py-6">
+      <Breadcrumb
+        className="mb-6"
+        segments={[
+          { name: "Compare Properties", href: "/comparison" }
+        ]}
+      />
+      
+      <div className="max-w-5xl mx-auto">
+        <div className="bg-white rounded-xl shadow-sm overflow-hidden">
+          <div className="p-6 md:p-8 border-b border-neutral-200">
+            <h1 className="font-poppins font-bold text-2xl text-neutral-800 mb-2">
+              Compare Properties
+            </h1>
+            <p className="text-neutral-600">
+              Compare up to 3 properties to make the best decision for your investment
+            </p>
+          </div>
+          
+          <div className="p-6 md:p-8">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+              {/* Property 1 Selection */}
+              <Dialog>
+                <DialogTrigger asChild>
+                  {selectedProperties[0] ? (
+                    <div className="relative cursor-pointer">
+                      <PropertyCard property={selectedProperties[0]} />
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="absolute top-2 right-2 bg-white bg-opacity-70 hover:bg-opacity-100 p-1 rounded-full text-neutral-700"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          removeProperty(0);
+                        }}
+                      >
+                        ✕
+                      </Button>
+                    </div>
+                  ) : (
+                    <div 
+                      className="border border-dashed border-neutral-300 rounded-lg p-4 flex flex-col items-center justify-center min-h-[250px] cursor-pointer hover:bg-neutral-50"
+                      onClick={() => setSelectingIndex(0)}
+                    >
+                      <div className="mb-3 p-3 bg-primary-100 text-primary-600 rounded-full">
+                        <Building className="h-6 w-6" />
+                      </div>
+                      <p className="text-center text-neutral-600 mb-4">Select first property to compare</p>
+                      <Button variant="default" size="sm">
+                        Select Property
+                      </Button>
+                    </div>
+                  )}
+                </DialogTrigger>
+                <DialogContent className="sm:max-w-md">
+                  <DialogHeader>
+                    <DialogTitle>Select Property #1</DialogTitle>
+                    <DialogDescription>
+                      Choose a property to add to your comparison
+                    </DialogDescription>
+                  </DialogHeader>
+                  <div className="grid grid-cols-1 gap-4 py-4 max-h-[60vh] overflow-y-auto">
+                    {isLoading ? (
+                      <div className="text-center p-4">Loading properties...</div>
+                    ) : properties && properties.length > 0 ? (
+                      properties.map((property: Property) => (
+                        <div 
+                          key={property.id}
+                          className="p-3 border border-neutral-200 rounded-lg hover:border-primary-300 hover:bg-primary-50 cursor-pointer"
+                          onClick={() => selectProperty(property)}
+                        >
+                          <div className="flex items-start">
+                            <div className="flex-shrink-0 w-16 h-16 bg-neutral-200 rounded-md flex items-center justify-center mr-3">
+                              <Building2 className="h-8 w-8 text-neutral-400" />
+                            </div>
+                            <div>
+                              <h3 className="font-medium">{property.name}</h3>
+                              <p className="text-sm text-neutral-600">{property.address}</p>
+                              <p className="text-sm font-medium text-primary-600">
+                                ₹{property.estimatedValue?.toLocaleString() || 'N/A'}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="text-center p-4">No properties available</div>
+                    )}
+                  </div>
+                </DialogContent>
+              </Dialog>
+              
+              {/* Property 2 Selection */}
+              <Dialog>
+                <DialogTrigger asChild>
+                  {selectedProperties[1] ? (
+                    <div className="relative cursor-pointer">
+                      <PropertyCard property={selectedProperties[1]} />
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="absolute top-2 right-2 bg-white bg-opacity-70 hover:bg-opacity-100 p-1 rounded-full text-neutral-700"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          removeProperty(1);
+                        }}
+                      >
+                        ✕
+                      </Button>
+                    </div>
+                  ) : (
+                    <div 
+                      className="border border-dashed border-neutral-300 rounded-lg p-4 flex flex-col items-center justify-center min-h-[250px] cursor-pointer hover:bg-neutral-50"
+                      onClick={() => setSelectingIndex(1)}
+                    >
+                      <div className="mb-3 p-3 bg-primary-100 text-primary-600 rounded-full">
+                        <Building2 className="h-6 w-6" />
+                      </div>
+                      <p className="text-center text-neutral-600 mb-4">Select second property to compare</p>
+                      <Button variant="default" size="sm">
+                        Select Property
+                      </Button>
+                    </div>
+                  )}
+                </DialogTrigger>
+                <DialogContent className="sm:max-w-md">
+                  <DialogHeader>
+                    <DialogTitle>Select Property #2</DialogTitle>
+                    <DialogDescription>
+                      Choose a property to add to your comparison
+                    </DialogDescription>
+                  </DialogHeader>
+                  <div className="grid grid-cols-1 gap-4 py-4 max-h-[60vh] overflow-y-auto">
+                    {isLoading ? (
+                      <div className="text-center p-4">Loading properties...</div>
+                    ) : properties && properties.length > 0 ? (
+                      properties.map((property: Property) => (
+                        <div 
+                          key={property.id}
+                          className="p-3 border border-neutral-200 rounded-lg hover:border-primary-300 hover:bg-primary-50 cursor-pointer"
+                          onClick={() => selectProperty(property)}
+                        >
+                          <div className="flex items-start">
+                            <div className="flex-shrink-0 w-16 h-16 bg-neutral-200 rounded-md flex items-center justify-center mr-3">
+                              <Building2 className="h-8 w-8 text-neutral-400" />
+                            </div>
+                            <div>
+                              <h3 className="font-medium">{property.name}</h3>
+                              <p className="text-sm text-neutral-600">{property.address}</p>
+                              <p className="text-sm font-medium text-primary-600">
+                                ₹{property.estimatedValue?.toLocaleString() || 'N/A'}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="text-center p-4">No properties available</div>
+                    )}
+                  </div>
+                </DialogContent>
+              </Dialog>
+              
+              {/* Property 3 Selection */}
+              <Dialog>
+                <DialogTrigger asChild>
+                  {selectedProperties[2] ? (
+                    <div className="relative cursor-pointer">
+                      <PropertyCard property={selectedProperties[2]} />
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="absolute top-2 right-2 bg-white bg-opacity-70 hover:bg-opacity-100 p-1 rounded-full text-neutral-700"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          removeProperty(2);
+                        }}
+                      >
+                        ✕
+                      </Button>
+                    </div>
+                  ) : (
+                    <div 
+                      className="border border-dashed border-neutral-300 rounded-lg p-4 flex flex-col items-center justify-center min-h-[250px] cursor-pointer hover:bg-neutral-50"
+                      onClick={() => setSelectingIndex(2)}
+                    >
+                      <div className="mb-3 p-3 bg-primary-100 text-primary-600 rounded-full">
+                        <Tally4 className="h-6 w-6" />
+                      </div>
+                      <p className="text-center text-neutral-600 mb-4">Select third property to compare</p>
+                      <Button variant="default" size="sm">
+                        Select Property
+                      </Button>
+                    </div>
+                  )}
+                </DialogTrigger>
+                <DialogContent className="sm:max-w-md">
+                  <DialogHeader>
+                    <DialogTitle>Select Property #3</DialogTitle>
+                    <DialogDescription>
+                      Choose a property to add to your comparison
+                    </DialogDescription>
+                  </DialogHeader>
+                  <div className="grid grid-cols-1 gap-4 py-4 max-h-[60vh] overflow-y-auto">
+                    {isLoading ? (
+                      <div className="text-center p-4">Loading properties...</div>
+                    ) : properties && properties.length > 0 ? (
+                      properties.map((property: Property) => (
+                        <div 
+                          key={property.id}
+                          className="p-3 border border-neutral-200 rounded-lg hover:border-primary-300 hover:bg-primary-50 cursor-pointer"
+                          onClick={() => selectProperty(property)}
+                        >
+                          <div className="flex items-start">
+                            <div className="flex-shrink-0 w-16 h-16 bg-neutral-200 rounded-md flex items-center justify-center mr-3">
+                              <Building2 className="h-8 w-8 text-neutral-400" />
+                            </div>
+                            <div>
+                              <h3 className="font-medium">{property.name}</h3>
+                              <p className="text-sm text-neutral-600">{property.address}</p>
+                              <p className="text-sm font-medium text-primary-600">
+                                ₹{property.estimatedValue?.toLocaleString() || 'N/A'}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="text-center p-4">No properties available</div>
+                    )}
+                  </div>
+                </DialogContent>
+              </Dialog>
+            </div>
+            
+            <div className="bg-neutral-50 p-4 rounded-lg mb-8">
+              <div className="flex items-center text-neutral-600 text-sm">
+                <Info className="mr-2 text-primary-500 h-5 w-5" />
+                <p>Select properties to compare their features, prices, location advantages, and investment potential side by side.</p>
+              </div>
+            </div>
+            
+            {/* Comparison Table */}
+            <div className="overflow-x-auto">
+              <table className="min-w-full bg-white rounded-lg border border-neutral-200 overflow-hidden">
+                <thead>
+                  <tr className="bg-neutral-50 text-neutral-700">
+                    <th className="py-3 px-4 text-left font-medium">Feature</th>
+                    <th className="py-3 px-4 text-center font-medium">Property 1</th>
+                    <th className="py-3 px-4 text-center font-medium">Property 2</th>
+                    <th className="py-3 px-4 text-center font-medium">Property 3</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr className="border-t border-neutral-200">
+                    <td className="py-3 px-4 font-medium">Price</td>
+                    <td className="py-3 px-4 text-center">
+                      {selectedProperties[0] ? `₹${selectedProperties[0].estimatedValue?.toLocaleString() || 'N/A'}` : '-'}
+                    </td>
+                    <td className="py-3 px-4 text-center">
+                      {selectedProperties[1] ? `₹${selectedProperties[1].estimatedValue?.toLocaleString() || 'N/A'}` : '-'}
+                    </td>
+                    <td className="py-3 px-4 text-center">
+                      {selectedProperties[2] ? `₹${selectedProperties[2].estimatedValue?.toLocaleString() || 'N/A'}` : '-'}
+                    </td>
+                  </tr>
+                  <tr className="border-t border-neutral-200">
+                    <td className="py-3 px-4 font-medium">Size</td>
+                    <td className="py-3 px-4 text-center">
+                      {selectedProperties[0] ? `${selectedProperties[0].size} sq ft` : '-'}
+                    </td>
+                    <td className="py-3 px-4 text-center">
+                      {selectedProperties[1] ? `${selectedProperties[1].size} sq ft` : '-'}
+                    </td>
+                    <td className="py-3 px-4 text-center">
+                      {selectedProperties[2] ? `${selectedProperties[2].size} sq ft` : '-'}
+                    </td>
+                  </tr>
+                  <tr className="border-t border-neutral-200">
+                    <td className="py-3 px-4 font-medium">Location</td>
+                    <td className="py-3 px-4 text-center">
+                      {selectedProperties[0] ? selectedProperties[0].location : '-'}
+                    </td>
+                    <td className="py-3 px-4 text-center">
+                      {selectedProperties[1] ? selectedProperties[1].location : '-'}
+                    </td>
+                    <td className="py-3 px-4 text-center">
+                      {selectedProperties[2] ? selectedProperties[2].location : '-'}
+                    </td>
+                  </tr>
+                  <tr className="border-t border-neutral-200">
+                    <td className="py-3 px-4 font-medium">Age</td>
+                    <td className="py-3 px-4 text-center">
+                      {selectedProperties[0] ? `${selectedProperties[0].age} years` : '-'}
+                    </td>
+                    <td className="py-3 px-4 text-center">
+                      {selectedProperties[1] ? `${selectedProperties[1].age} years` : '-'}
+                    </td>
+                    <td className="py-3 px-4 text-center">
+                      {selectedProperties[2] ? `${selectedProperties[2].age} years` : '-'}
+                    </td>
+                  </tr>
+                  <tr className="border-t border-neutral-200">
+                    <td className="py-3 px-4 font-medium">Property Type</td>
+                    <td className="py-3 px-4 text-center">
+                      {selectedProperties[0] ? (
+                        <span className="capitalize">{selectedProperties[0].propertyType}</span>
+                      ) : '-'}
+                    </td>
+                    <td className="py-3 px-4 text-center">
+                      {selectedProperties[1] ? (
+                        <span className="capitalize">{selectedProperties[1].propertyType}</span>
+                      ) : '-'}
+                    </td>
+                    <td className="py-3 px-4 text-center">
+                      {selectedProperties[2] ? (
+                        <span className="capitalize">{selectedProperties[2].propertyType}</span>
+                      ) : '-'}
+                    </td>
+                  </tr>
+                  <tr className="border-t border-neutral-200">
+                    <td className="py-3 px-4 font-medium">Bedrooms</td>
+                    <td className="py-3 px-4 text-center">
+                      {selectedProperties[0] && selectedProperties[0].bedrooms != null ? 
+                        selectedProperties[0].bedrooms : '-'}
+                    </td>
+                    <td className="py-3 px-4 text-center">
+                      {selectedProperties[1] && selectedProperties[1].bedrooms != null ? 
+                        selectedProperties[1].bedrooms : '-'}
+                    </td>
+                    <td className="py-3 px-4 text-center">
+                      {selectedProperties[2] && selectedProperties[2].bedrooms != null ? 
+                        selectedProperties[2].bedrooms : '-'}
+                    </td>
+                  </tr>
+                  <tr className="border-t border-neutral-200">
+                    <td className="py-3 px-4 font-medium">Bathrooms</td>
+                    <td className="py-3 px-4 text-center">
+                      {selectedProperties[0] && selectedProperties[0].bathrooms != null ? 
+                        selectedProperties[0].bathrooms : '-'}
+                    </td>
+                    <td className="py-3 px-4 text-center">
+                      {selectedProperties[1] && selectedProperties[1].bathrooms != null ? 
+                        selectedProperties[1].bathrooms : '-'}
+                    </td>
+                    <td className="py-3 px-4 text-center">
+                      {selectedProperties[2] && selectedProperties[2].bathrooms != null ? 
+                        selectedProperties[2].bathrooms : '-'}
+                    </td>
+                  </tr>
+                  <tr className="border-t border-neutral-200">
+                    <td className="py-3 px-4 font-medium">Location Quality</td>
+                    <td className="py-3 px-4 text-center">
+                      {selectedProperties[0] && selectedProperties[0].locationScore != null ? 
+                        `${selectedProperties[0].locationScore}/10` : '-'}
+                    </td>
+                    <td className="py-3 px-4 text-center">
+                      {selectedProperties[1] && selectedProperties[1].locationScore != null ? 
+                        `${selectedProperties[1].locationScore}/10` : '-'}
+                    </td>
+                    <td className="py-3 px-4 text-center">
+                      {selectedProperties[2] && selectedProperties[2].locationScore != null ? 
+                        `${selectedProperties[2].locationScore}/10` : '-'}
+                    </td>
+                  </tr>
+                  <tr className="border-t border-neutral-200">
+                    <td className="py-3 px-4 font-medium">Price per sq ft</td>
+                    <td className="py-3 px-4 text-center">
+                      {selectedProperties[0] ? `₹${(Number(selectedProperties[0].estimatedValue) / Number(selectedProperties[0].size)).toFixed(2)}` : '-'}
+                    </td>
+                    <td className="py-3 px-4 text-center">
+                      {selectedProperties[1] ? `₹${(Number(selectedProperties[1].estimatedValue) / Number(selectedProperties[1].size)).toFixed(2)}` : '-'}
+                    </td>
+                    <td className="py-3 px-4 text-center">
+                      {selectedProperties[2] ? `₹${(Number(selectedProperties[2].estimatedValue) / Number(selectedProperties[2].size)).toFixed(2)}` : '-'}
+                    </td>
+                  </tr>
+                  <tr className="border-t border-neutral-200">
+                    <td className="py-3 px-4 font-medium">AI recommendation</td>
+                    <td className="py-3 px-4 text-center">
+                      {getRecommendation(0)}
+                    </td>
+                    <td className="py-3 px-4 text-center">
+                      {getRecommendation(1)}
+                    </td>
+                    <td className="py-3 px-4 text-center">
+                      {getRecommendation(2)}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const Info = (props: React.SVGProps<SVGSVGElement>) => (
+  <svg {...props} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="10"/>
+    <path d="M12 16v-4"/>
+    <path d="M12 8h.01"/>
+  </svg>
+);
+
+export default PropertyComparison;
+
+
+
+
+shared/schema.ts
+import { pgTable, text, serial, integer, boolean, numeric, timestamp } from "drizzle-orm/pg-core";
+import { createInsertSchema } from "drizzle-zod";
+import { z } from "zod";
+
+export const users = pgTable("users", {
+  id: serial("id").primaryKey(),
+  username: text("username").notNull().unique(),
+  password: text("password").notNull(),
+});
+
+export const properties = pgTable("properties", {
+  id: serial("id").primaryKey(),
+  name: text("name").notNull(),
+  location: text("location").notNull(), // city, suburb, rural
+  size: numeric("size").notNull(), // in sq ft
+  age: integer("age").notNull(), // in years
+  basePricePerSqft: numeric("base_price_per_sqft").notNull(),
+  address: text("address").notNull(),
+  latitude: numeric("latitude").default("0"),
+  longitude: numeric("longitude").default("0"),
+  propertyType: text("property_type").notNull(), // apartment, house, villa, plot, commercial
+  features: text("features").array(),
+  estimatedValue: numeric("estimated_value"),
+  // New fields
+  bedrooms: integer("bedrooms").default(0),
+  bathrooms: integer("bathrooms").default(0),
+  locationScore: integer("location_score").default(0), // 1-10 score based on amenities and convenience
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const propertyComparisons = pgTable("property_comparisons", {
+  id: serial("id").primaryKey(),
+  propertyIds: integer("property_ids").array().notNull(),
+  userId: integer("user_id").references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+// Zod schemas
+export const insertUserSchema = createInsertSchema(users).pick({
+  username: true,
+  password: true,
+});
+
+export const insertPropertySchema = createInsertSchema(properties).omit({
+  id: true,
+  createdAt: true,
+  latitude: true,
+  longitude: true,
+  estimatedValue: true,
+});
+
+// Greater Noida popular locations for dropdown
+export const greaterNoidaLocations = [
+  { value: "sector_1", label: "Sector 1", priceMultiplier: 1.15 },
+  { value: "sector_12", label: "Sector 12", priceMultiplier: 1.3 },
+  { value: "sector_16b", label: "Sector 16B", priceMultiplier: 1.4 },
+  { value: "sector_27", label: "Sector 27", priceMultiplier: 1.2 },
+  { value: "sector_37", label: "Sector 37 (Delta)", priceMultiplier: 1.25 },
+  { value: "knowledge_park", label: "Knowledge Park", priceMultiplier: 1.35 },
+  { value: "pari_chowk", label: "Pari Chowk", priceMultiplier: 1.45 },
+  { value: "alpha_1", label: "Alpha 1", priceMultiplier: 1.35 },
+  { value: "beta_1", label: "Beta 1", priceMultiplier: 1.3 },
+  { value: "gamma_1", label: "Gamma 1", priceMultiplier: 1.25 },
+  { value: "chi_4", label: "Chi 4", priceMultiplier: 1.15 },
+  { value: "surajpur", label: "Surajpur", priceMultiplier: 1.1 },
+  { value: "kasna", label: "Kasna", priceMultiplier: 1.05 },
+  { value: "omicron", label: "Omicron", priceMultiplier: 1.2 },
+  { value: "tech_zone", label: "Tech Zone", priceMultiplier: 1.4 },
+];
+
+export const propertyTypeOptions = [
+  { value: "apartment", label: "Apartment" },
+  { value: "house", label: "House" },
+  { value: "villa", label: "Villa" },
+  { value: "plot", label: "Plot" },
+  { value: "commercial", label: "Commercial" },
+];
+
+export const valuationRequestSchema = z.object({
+  name: z.string().min(1, "Property name is required"),
+  location: z.enum(["city", "suburb", "rural"]),
+  size: z.number().min(1, "Size must be positive"),
+  age: z.number().min(0, "Age cannot be negative"),
+  basePricePerSqft: z.number().min(1, "Base price must be positive"),
+  address: z.string().min(1, "Address is required"),
+  // New fields
+  bedrooms: z.number().min(0, "Bedrooms cannot be negative").optional(),
+  bathrooms: z.number().min(0, "Bathrooms cannot be negative").optional(),
+  locationScore: z.number().min(1, "Location score must be between 1-10").max(10, "Location score must be between 1-10").optional(),
+  specificLocation: z.string().optional(), // For dropdown selection of specific Greater Noida locations
+  propertyType: z.string().optional(), // Type of property
+});
+
+export const chatRequestSchema = z.object({
+  message: z.string().min(1, "Message is required"),
+});
+
+// Types
+export type InsertUser = z.infer<typeof insertUserSchema>;
+export type InsertProperty = z.infer<typeof insertPropertySchema>;
+export type Property = typeof properties.$inferSelect;
+export type User = typeof users.$inferSelect;
+export type ValuationRequest = z.infer<typeof valuationRequestSchema>;
+export type ChatRequest = z.infer<typeof chatRequestSchema>;
+export type GreaterNoidaLocation = typeof greaterNoidaLocations[number];
+
+
+
+
+
+
+
