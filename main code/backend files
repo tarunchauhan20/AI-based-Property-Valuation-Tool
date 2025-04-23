@@ -1,0 +1,948 @@
+
+server/index.ts
+
+import express from "express";
+import session from "express-session";
+import { registerRoutes } from "./routes";
+import { log, setupVite, serveStatic } from "./vite";
+
+async function main() {
+  // Set up Express
+  const app = express();
+  
+  // Parse JSON request body
+  app.use(express.json());
+  
+  // Configure session
+  app.use(
+    session({
+      secret: "your-session-secret",
+      resave: false,
+      saveUninitialized: true,
+      cookie: { secure: process.env.NODE_ENV === "production" },
+    })
+  );
+  
+  // Register API routes
+  const server = await registerRoutes(app);
+  
+  // Set up Vite for development
+  if (process.env.NODE_ENV === "development") {
+    await setupVite(app, server);
+  } else {
+    // Serve static files in production
+    serveStatic(app);
+  }
+  
+  // Handle errors
+  app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+    log(`Error: ${err.message}`);
+    res.status(err.statusCode || 500).json({
+      message: err.message || "Internal Server Error",
+    });
+  });
+  
+  // Start server
+  const PORT = process.env.PORT || 5000;
+  server.listen(PORT, () => {
+    log(`serving on port ${PORT}`);
+  });
+}
+
+main().catch((err) => {
+  console.error("Failed to start server:", err);
+  process.exit(1);
+});
+
+server/routes.ts
+import type { Express } from "express";
+import { createServer, type Server } from "http";
+import { storage } from "./storage";
+import { estimatePropertyValue } from "./utils/valuation";
+import { geocodeAddress } from "./utils/geocoding";
+import { getChatResponse } from "./utils/openai";
+import { Property, ValuationRequest, ChatRequest, valuationRequestSchema, chatRequestSchema } from "@shared/schema";
+import { ZodError } from "zod";
+
+export async function registerRoutes(app: Express): Promise<Server> {
+  // Initialize HTTP server
+  const httpServer = createServer(app);
+  
+  // GET /api/properties - Get all properties with filtering options
+  app.get("/api/properties", async (req, res) => {
+    try {
+      const { 
+        q, 
+        featured, 
+        limit = 12, 
+        page = 1, 
+        sortBy = 'newest',
+        minPrice,
+        maxPrice,
+        location,
+        propertyType
+      } = req.query;
+      
+      // Get properties with filters
+      const properties = await storage.getProperties({
+        searchQuery: q as string,
+        featured: featured === 'true',
+        limit: Number(limit),
+        page: Number(page),
+        sortBy: sortBy as string,
+        minPrice: minPrice ? Number(minPrice) : undefined,
+        maxPrice: maxPrice ? Number(maxPrice) : undefined,
+        location: location as string,
+        propertyType: propertyType as string
+      });
+      
+      res.json(properties);
+    } catch (error) {
+      console.error("Error fetching properties:", error);
+      res.status(500).json({ message: "Failed to fetch properties" });
+    }
+  });
+  
+  // GET /api/properties/:id - Get a single property by ID
+  app.get("/api/properties/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const property = await storage.getProperty(Number(id));
+      
+      if (!property) {
+        return res.status(404).json({ message: "Property not found" });
+      }
+      
+      res.json(property);
+    } catch (error) {
+      console.error("Error fetching property:", error);
+      res.status(500).json({ message: "Failed to fetch property" });
+    }
+  });
+  
+  // POST /api/properties - Create a new property
+  app.post("/api/properties", async (req, res) => {
+    try {
+      const propertyData = req.body;
+      
+      // Geocode the address to get coordinates
+      if (propertyData.address) {
+        const coordinates = await geocodeAddress(propertyData.address);
+        if (coordinates) {
+          propertyData.latitude = coordinates.latitude;
+          propertyData.longitude = coordinates.longitude;
+        }
+      }
+      
+      // Estimate property value
+      const valuationResult = await estimatePropertyValue({
+        name: propertyData.name,
+        location: propertyData.location,
+        size: propertyData.size,
+        age: propertyData.age,
+        basePricePerSqft: propertyData.basePricePerSqft,
+        address: propertyData.address,
+        latitude: propertyData.latitude, 
+        longitude: propertyData.longitude
+      });
+      
+      // Set the estimated value
+      propertyData.estimatedValue = valuationResult.estimatedValue;
+      
+      // Create the property
+      const newProperty = await storage.createProperty(propertyData);
+      
+      res.status(201).json(newProperty);
+    } catch (error) {
+      console.error("Error creating property:", error);
+      res.status(500).json({ message: "Failed to create property" });
+    }
+  });
+  
+  // POST /api/valuation - Calculate property value
+  app.post("/api/valuation", async (req, res) => {
+    try {
+      // Validate request body
+      const validatedData = valuationRequestSchema.parse(req.body);
+      
+      // Geocode the address to get coordinates
+      let latitude = 0;
+      let longitude = 0;
+      
+      if (validatedData.address) {
+        const coordinates = await geocodeAddress(validatedData.address);
+        if (coordinates) {
+          latitude = coordinates.latitude;
+          longitude = coordinates.longitude;
+        }
+      }
+      
+      // Calculate property value
+      const valuationResult = await estimatePropertyValue({
+        ...validatedData,
+        latitude,
+        longitude
+      });
+      
+      res.json(valuationResult);
+    } catch (error) {
+      console.error("Valuation error:", error);
+      
+      if (error instanceof ZodError) {
+        return res.status(400).json({ 
+          message: "Invalid request data", 
+          errors: error.errors 
+        });
+      }
+      
+      res.status(500).json({ message: "Valuation failed" });
+    }
+  });
+  
+  // POST /api/chat - Get AI assistant response
+  app.post("/api/chat", async (req, res) => {
+    try {
+      // Validate request body
+      const validatedData = chatRequestSchema.parse(req.body);
+      
+      // Get AI response
+      const response = await getChatResponse(validatedData.message);
+      
+      res.json({ response });
+    } catch (error) {
+      console.error("Chat error:", error);
+      
+      if (error instanceof ZodError) {
+        return res.status(400).json({ 
+          message: "Invalid request data", 
+          errors: error.errors 
+        });
+      }
+      
+      res.status(500).json({ message: "Failed to get AI response" });
+    }
+  });
+  
+  // GET /api/market-insights - Get market insights data
+  app.get("/api/market-insights", async (req, res) => {
+    try {
+      // For now, return static market insights
+      // In a production app, this would be calculated from real data
+      const insights = {
+        averagePrice: 4850,
+        priceGrowth: 3.2,
+        demandGrowth: 8.5,
+        topLocations: [
+          { name: "Sector 16B", growth: 8.5 },
+          { name: "Sector 12", growth: 7.6 },
+          { name: "Sector 4", growth: 6.8 }
+        ]
+      };
+      
+      res.json(insights);
+    } catch (error) {
+      console.error("Error fetching market insights:", error);
+      res.status(500).json({ message: "Failed to fetch market insights" });
+    }
+  });
+  
+  // Add a route to seed the database with initial properties (simplified version)
+  app.post("/api/seed", async (req, res) => {
+    try {
+      // Check if there are already properties
+      const existingProperties = await storage.getProperties({});
+      
+      if (existingProperties.length > 0) {
+        return res.json({ message: "Database already has properties", count: existingProperties.length });
+      }
+      
+      // Sample properties for Greater Noida
+      const sampleProperties = [
+        {
+          name: "Elegant 3BHK Apartment",
+          location: "city" as const,
+          size: "1450",
+          age: 2,
+          basePricePerSqft: "4000",
+          address: "Sector 16B, Greater Noida, Uttar Pradesh",
+          propertyType: "apartment",
+          features: ["24/7 Security", "Garden View", "Power Backup"],
+          bedrooms: 3,
+          bathrooms: 2,
+          locationScore: 8,
+          specificLocation: "sector_16b",
+          // Static coordinates for Greater Noida areas (for demonstration)
+          latitude: 28.47,
+          longitude: 77.51,
+          estimatedValue: 5800000
+        },
+        {
+          name: "Luxury Villa with Garden",
+          location: "suburb" as const,
+          size: "2800",
+          age: 1,
+          basePricePerSqft: "4500",
+          address: "Sector 12, Greater Noida, Uttar Pradesh",
+          propertyType: "villa",
+          features: ["Swimming Pool", "Private Garden", "4 Bedrooms"],
+          bedrooms: 4,
+          bathrooms: 4,
+          locationScore: 9,
+          specificLocation: "sector_12",
+          latitude: 28.48,
+          longitude: 77.50,
+          estimatedValue: 12600000
+        },
+        {
+          name: "Cozy 2BHK with Balcony",
+          location: "city" as const,
+          size: "1100",
+          age: 3,
+          basePricePerSqft: "3800",
+          address: "Sector 4, Greater Noida, Uttar Pradesh",
+          propertyType: "apartment",
+          features: ["Near Metro", "Modern Amenities", "Balcony"],
+          bedrooms: 2,
+          bathrooms: 2,
+          locationScore: 7,
+          specificLocation: "sector_4",
+          latitude: 28.45,
+          longitude: 77.52,
+          estimatedValue: 4180000
+        },
+        {
+          name: "Modern 3BHK House",
+          location: "suburb" as const,
+          size: "1800",
+          age: 0,
+          basePricePerSqft: "4200",
+          address: "Sector 27, Greater Noida, Uttar Pradesh",
+          propertyType: "house",
+          features: ["Modern Interiors", "Terrace", "Newly Constructed"],
+          bedrooms: 3,
+          bathrooms: 3,
+          locationScore: 8,
+          specificLocation: "sector_27",
+          latitude: 28.49,
+          longitude: 77.535,
+          estimatedValue: 7560000
+        },
+        {
+          name: "Commercial Space",
+          location: "city" as const,
+          size: "2500",
+          age: 2,
+          basePricePerSqft: "7000",
+          address: "Knowledge Park, Greater Noida, Uttar Pradesh",
+          propertyType: "commercial",
+          features: ["Prime Location", "High Footfall", "Parking Space"],
+          bedrooms: 0,
+          bathrooms: 2,
+          locationScore: 10,
+          specificLocation: "knowledge_park",
+          latitude: 28.47,
+          longitude: 77.48,
+          estimatedValue: 17500000
+        },
+        {
+          name: "Residential Plot",
+          location: "rural" as const,
+          size: "1200",
+          age: 0,
+          basePricePerSqft: "2900",
+          address: "Sector 1, Greater Noida, Uttar Pradesh",
+          propertyType: "plot",
+          features: ["Corner Plot", "Developed Area", "All Utilities"],
+          bedrooms: 0,
+          bathrooms: 0,
+          locationScore: 6,
+          specificLocation: "sector_1",
+          latitude: 28.465,
+          longitude: 77.51,
+          estimatedValue: 3480000
+        }
+      ];
+      
+      // Create properties directly without geocoding or valuation calls
+      const properties: Property[] = [];
+      
+      for (const propData of sampleProperties) {
+        // Create property with the provided data
+        const newProperty = await storage.createProperty(propData);
+        properties.push(newProperty);
+      }
+      
+      res.json({ 
+        message: "Database seeded successfully", 
+        count: properties.length
+      });
+    } catch (error) {
+      console.error("Error seeding database:", error);
+      res.status(500).json({ message: "Failed to seed database" });
+    }
+  });
+  
+  return httpServer;
+}
+
+
+server/storage.ts
+import { Property, InsertProperty, InsertUser, User } from "@shared/schema";
+
+export interface IStorage {
+  // User operations
+  getUser(id: number): Promise<User | undefined>;
+  getUserByUsername(username: string): Promise<User | undefined>;
+  createUser(user: InsertUser): Promise<User>;
+  
+  // Property operations
+  getProperties(options: {
+    searchQuery?: string;
+    featured?: boolean;
+    limit?: number;
+    page?: number;
+    sortBy?: string;
+    minPrice?: number;
+    maxPrice?: number;
+    location?: string;
+    propertyType?: string;
+  }): Promise<Property[]>;
+  getProperty(id: number): Promise<Property | undefined>;
+  createProperty(property: InsertProperty & { 
+    latitude?: number; 
+    longitude?: number;
+    estimatedValue?: number;
+  }): Promise<Property>;
+}
+
+export class MemStorage implements IStorage {
+  private users: Map<number, User>;
+  private properties: Map<number, Property>;
+  private userIdCounter: number;
+  private propertyIdCounter: number;
+  
+  constructor() {
+    this.users = new Map();
+    this.properties = new Map();
+    this.userIdCounter = 1;
+    this.propertyIdCounter = 1;
+  }
+  
+  async getUser(id: number): Promise<User | undefined> {
+    return this.users.get(id);
+  }
+  
+  async getUserByUsername(username: string): Promise<User | undefined> {
+    for (const user of this.users.values()) {
+      if (user.username === username) {
+        return user;
+      }
+    }
+    return undefined;
+  }
+  
+  async createUser(insertUser: InsertUser): Promise<User> {
+    const id = this.userIdCounter++;
+    const now = new Date();
+    
+    const newUser: User = {
+      ...insertUser,
+      id,
+      createdAt: now
+    };
+    
+    this.users.set(id, newUser);
+    return newUser;
+  }
+  
+  async getProperties(options: {
+    searchQuery?: string;
+    featured?: boolean;
+    limit?: number;
+    page?: number;
+    sortBy?: string;
+    minPrice?: number;
+    maxPrice?: number;
+    location?: string;
+    propertyType?: string;
+  }): Promise<Property[]> {
+    let properties = Array.from(this.properties.values());
+    
+    // Apply search filter
+    if (options.searchQuery) {
+      const searchLower = options.searchQuery.toLowerCase();
+      properties = properties.filter(p => 
+        p.name.toLowerCase().includes(searchLower) || 
+        p.address.toLowerCase().includes(searchLower)
+      );
+    }
+    
+    // Apply filters
+    if (options.minPrice !== undefined) {
+      properties = properties.filter(p => Number(p.estimatedValue) >= options.minPrice!);
+    }
+    
+    if (options.maxPrice !== undefined) {
+      properties = properties.filter(p => Number(p.estimatedValue) <= options.maxPrice!);
+    }
+    
+    if (options.location) {
+      properties = properties.filter(p => p.location === options.location);
+    }
+    
+    if (options.propertyType) {
+      properties = properties.filter(p => p.propertyType === options.propertyType);
+    }
+    
+    // Apply sorting
+    if (options.sortBy) {
+      switch (options.sortBy) {
+        case 'price_low_high':
+          properties.sort((a, b) => Number(a.estimatedValue) - Number(b.estimatedValue));
+          break;
+        case 'price_high_low':
+          properties.sort((a, b) => Number(b.estimatedValue) - Number(a.estimatedValue));
+          break;
+        case 'newest':
+          properties.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+          break;
+        case 'oldest':
+          properties.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+          break;
+        case 'size_low_high':
+          properties.sort((a, b) => Number(a.size) - Number(b.size));
+          break;
+        case 'size_high_low':
+          properties.sort((a, b) => Number(b.size) - Number(a.size));
+          break;
+        default:
+          // Default to newest
+          properties.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+      }
+    } else {
+      // Default sorting is by creation date (newest first)
+      properties.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    }
+    
+    // Apply pagination
+    if (options.page && options.limit) {
+      const startIndex = (options.page - 1) * options.limit;
+      properties = properties.slice(startIndex, startIndex + options.limit);
+    } else if (options.limit) {
+      properties = properties.slice(0, options.limit);
+    }
+    
+    return properties;
+  }
+  
+  async getProperty(id: number): Promise<Property | undefined> {
+    return this.properties.get(id);
+  }
+  
+  async createProperty(property: InsertProperty & { 
+    latitude?: number; 
+    longitude?: number;
+    estimatedValue?: number;
+  }): Promise<Property> {
+    const id = this.propertyIdCounter++;
+    const now = new Date();
+    
+    // Convert numeric values to strings to match the schema
+    // Handle optional feature and ensure proper nulls for optional fields
+    const newProperty: Property = {
+      id,
+      name: property.name,
+      location: property.location,
+      size: String(property.size),
+      age: property.age,
+      basePricePerSqft: String(property.basePricePerSqft),
+      address: property.address,
+      latitude: String(property.latitude || 0),
+      longitude: String(property.longitude || 0),
+      propertyType: property.propertyType,
+      features: property.features || null,
+      estimatedValue: String(property.estimatedValue || 0),
+      bedrooms: property.bedrooms || null,
+      bathrooms: property.bathrooms || null,
+      locationScore: property.locationScore || null,
+      createdAt: now
+    };
+    
+    this.properties.set(id, newProperty);
+    return newProperty;
+  }
+}
+
+export const storage = new MemStorage();
+
+
+
+server/utils/valuation.ts
+import { ValuationRequest, greaterNoidaLocations } from "@shared/schema";
+import { formatCurrency } from "../../client/src/lib/utils";
+import { generatePropertyInsights } from "./openai";
+
+interface ValuationResult {
+  estimatedValue: number;
+  priceRange: {
+    min: number;
+    max: number;
+  };
+  factors: {
+    locationImpact: number;
+    ageDepreciation: number;
+    distanceFactor: number;
+    bedroomsBathroomsImpact: number;
+    locationScoreImpact: number;
+    specificLocationImpact: number;
+  };
+  insights: string;
+  distanceFromCenter: number;
+}
+
+/**
+ * Calculate the Haversine distance between two coordinates (in kilometers)
+ */
+function haversine(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371; // Earth's radius in km
+  
+  const dLat = toRadians(lat2 - lat1);
+  const dLon = toRadians(lon2 - lon1);
+  
+  const a = 
+    Math.sin(dLat/2) * Math.sin(dLat/2) +
+    Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) * 
+    Math.sin(dLon/2) * Math.sin(dLon/2);
+    
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c;
+}
+
+/**
+ * Convert degrees to radians
+ */
+function toRadians(degrees: number): number {
+  return degrees * (Math.PI / 180);
+}
+
+/**
+ * Get location multiplier based on location type
+ */
+function getLocationMultiplier(location: string): number {
+  switch (location) {
+    case 'city':
+      return 1.15; // 15% premium for city locations
+    case 'suburb':
+      return 1.1; // 10% premium for suburban locations
+    case 'rural':
+      return 0.95; // 5% discount for rural locations
+    default:
+      return 1;
+  }
+}
+
+/**
+ * Get property type multiplier
+ */
+function getPropertyTypeMultiplier(propertyType: string): number {
+  switch (propertyType) {
+    case 'apartment':
+      return 1.05;
+    case 'house':
+      return 1.1;
+    case 'villa':
+      return 1.15;
+    case 'commercial':
+      return 1.2;
+    case 'plot':
+      return 0.95;
+    default:
+      return 1;
+  }
+}
+
+/**
+ * Get specific location multiplier based on Greater Noida location
+ */
+function getSpecificLocationMultiplier(specificLocation: string): number {
+  const location = greaterNoidaLocations.find(loc => loc.value === specificLocation);
+  return location ? location.priceMultiplier : 1;
+}
+
+/**
+ * Calculate rooms impact on price
+ */
+function calculateRoomsImpact(bedrooms: number, bathrooms: number): number {
+  return 0.02 * bedrooms + 0.015 * bathrooms;
+}
+
+/**
+ * Estimate the value of a property based on various factors
+ */
+export async function estimatePropertyValue(data: ValuationRequest & { latitude?: number, longitude?: number }): Promise<ValuationResult> {
+  // Calculate base value
+  const baseValue = Number(data.size) * Number(data.basePricePerSqft);
+  
+  // Calculate location impact
+  const locationMultiplier = getLocationMultiplier(data.location);
+  const locationImpact = baseValue * (locationMultiplier - 1);
+  
+  // Calculate age depreciation
+  const ageDepreciationRate = data.age * 0.01; // 1% per year
+  const ageDepreciation = -1 * baseValue * ageDepreciationRate;
+  
+  // Calculate distance impact
+  const defaultLatitude = 28.4744; // Greater Noida center
+  const defaultLongitude = 77.5040;
+  
+  const distance = haversine(
+    data.latitude || defaultLatitude,
+    data.longitude || defaultLongitude,
+    defaultLatitude,
+    defaultLongitude
+  );
+  
+  // Calculate distance factor (closer is better, up to 5km)
+  const distanceFactor = distance <= 5 ? 
+    baseValue * 0.05 * (1 - distance / 5) : // 0-5% positive impact for properties within 5km
+    -1 * baseValue * 0.03 * ((distance - 5) / 10); // 0-3% negative impact for properties beyond 5km (capped at 15km)
+  
+  // Calculate additional factors
+  let bedroomsBathroomsImpact = 0;
+  if (data.bedrooms && data.bathrooms) {
+    bedroomsBathroomsImpact = baseValue * calculateRoomsImpact(data.bedrooms, data.bathrooms);
+  }
+  
+  let locationScoreImpact = 0;
+  if (data.locationScore) {
+    locationScoreImpact = baseValue * ((data.locationScore - 5) / 50); // -8% to +10% impact
+  }
+  
+  let specificLocationImpact = 0;
+  if (data.specificLocation) {
+    const multiplier = getSpecificLocationMultiplier(data.specificLocation);
+    specificLocationImpact = baseValue * (multiplier - 1);
+  }
+  
+  // Apply property type multiplier if available
+  let propertyTypeImpact = 0;
+  if (data.propertyType) {
+    const typeMultiplier = getPropertyTypeMultiplier(data.propertyType);
+    propertyTypeImpact = baseValue * (typeMultiplier - 1);
+  }
+  
+  // Calculate estimated value
+  const estimatedValue = baseValue + locationImpact + ageDepreciation + distanceFactor + 
+                        bedroomsBathroomsImpact + locationScoreImpact + specificLocationImpact + propertyTypeImpact;
+  
+  // Calculate price range (±10%)
+  const priceRange = {
+    min: Math.round(estimatedValue * 0.9),
+    max: Math.round(estimatedValue * 1.1)
+  };
+  
+  // Generate insights based on property data
+  let insights = `This ${data.propertyType || 'property'} in ${data.location} area has an estimated value of ${formatCurrency(Math.round(estimatedValue))}. `;
+  
+  insights += `Located at a distance of ${distance.toFixed(1)} km from Greater Noida center, it has ${data.age === 0 ? 'new construction' : `an age of ${data.age} years`}. `;
+  
+  if (data.specificLocation) {
+    const locationInfo = greaterNoidaLocations.find(loc => loc.value === data.specificLocation);
+    if (locationInfo) {
+      insights += `Being in ${locationInfo.label} adds a premium of ${formatCurrency(Math.round(specificLocationImpact))} to the property value. `;
+    }
+  }
+  
+  if (data.bedrooms && data.bathrooms) {
+    insights += ` With ${data.bedrooms} bedrooms and ${data.bathrooms} bathrooms, the property offers ${data.bedrooms >= 3 ? 'ample' : 'standard'} living space.`;
+  }
+  
+  // Skip OpenAI call for seeding to avoid quota issues
+  // Just use our manually generated insights for demo purposes
+  /*
+  try {
+    // Try to get AI-generated insights if possible
+    if (data.name && data.address) {
+      const aiInsights = await generatePropertyInsights({
+        name: data.name,
+        location: data.location,
+        size: Number(data.size),
+        age: data.age,
+        address: data.address,
+        estimatedValue: Math.round(estimatedValue)
+      });
+      
+      if (aiInsights) {
+        insights = aiInsights;
+      }
+    }
+  } catch (error) {
+    console.error("Failed to generate AI insights:", error);
+    // Keep the manually generated insights as fallback
+  }
+  */
+  
+  return {
+    estimatedValue: Math.round(estimatedValue),
+    priceRange,
+    factors: {
+      locationImpact: Math.round(locationImpact),
+      ageDepreciation,
+      distanceFactor,
+      bedroomsBathroomsImpact: Math.round(bedroomsBathroomsImpact || 0),
+      locationScoreImpact: Math.round(locationScoreImpact || 0),
+      specificLocationImpact: Math.round(specificLocationImpact || 0)
+    },
+    insights,
+    distanceFromCenter: distance
+  };
+}
+
+server/utils/openai.ts
+import OpenAI from "openai";
+
+// Create an OpenAI client
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+/**
+ * Get a response from OpenAI ChatGPT for property queries
+ */
+export async function getChatResponse(message: string): Promise<string> {
+  try {
+    if (!process.env.OPENAI_API_KEY) {
+      return "I'm sorry, but the AI assistant is currently unavailable. Please try again later or contact support.";
+    }
+    
+    const prompt = `
+      You are PropertyGPT, a real estate expert specializing in property valuation and market trends in Greater Noida, India.
+      
+      Answer the following customer query about properties, market trends, or valuations in Greater Noida.
+      
+      If the user asks about specific Greater Noida regions like Alpha, Beta, Gamma, Delta, Pari Chowk, Knowledge Park, etc.,
+      provide informed insights about those areas.
+      
+      If the query is not related to real estate or Greater Noida, politely redirect the conversation to topics about Greater Noida property market.
+      
+      Keep your responses concise (under 150 words), informative and helpful.
+      
+      User query: ${message}
+    `;
+    
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o", // the newest OpenAI model is "gpt-4o" which was released May 13, 2024
+      messages: [
+        { role: "system", content: prompt }
+      ],
+      temperature: 0.7,
+      max_tokens: 250
+    });
+    
+    return response.choices[0].message.content || "I couldn't process your query. Please try again with a different question.";
+  } catch (error) {
+    console.error("OpenAI error:", error);
+    return "Sorry, I'm having trouble connecting to my knowledge base right now. Please try again later.";
+  }
+}
+
+/**
+ * Generate property insights based on property data
+ */
+export async function generatePropertyInsights(propertyData: {
+  name: string;
+  location: string;
+  size: number;
+  age: number;
+  address: string;
+  estimatedValue: number;
+}): Promise<string> {
+  try {
+    // Generate fallback insights without OpenAI if OpenAI API key is not set or quota is exceeded
+    if (!process.env.OPENAI_API_KEY) {
+      return generateFallbackInsights(propertyData);
+    }
+    
+    const prompt = `
+    Generate concise property investment insights for:
+    - Property: ${propertyData.name}
+    - Location: ${propertyData.location} area in ${propertyData.address}
+    - Size: ${propertyData.size} sq ft
+    - Age: ${propertyData.age} years
+    - Estimated Value: ₹${propertyData.estimatedValue.toLocaleString()}
+    
+    Focus on investment potential, market trends in that area of Greater Noida, and 1-2 key recommendations. Keep it under 100 words.
+    Respond with the insights only, no introduction or explanation.
+    `;
+    
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o", // the newest OpenAI model is "gpt-4o" which was released May 13, 2024
+      messages: [
+        { role: "user", content: prompt }
+      ],
+      temperature: 0.7,
+      max_tokens: 150
+    });
+    
+    return response.choices[0].message.content || generateFallbackInsights(propertyData);
+  } catch (error) {
+    console.error("OpenAI insights generation error:", error);
+    return generateFallbackInsights(propertyData);
+  }
+}
+
+// Generate insights without calling OpenAI
+function generateFallbackInsights(propertyData: {
+  name: string;
+  location: string;
+  size: number;
+  age: number;
+  address: string;
+  estimatedValue: number;
+}): string {
+  // Determine location-specific message
+  let locationMsg = "";
+  if (propertyData.address.includes("Sector 16B") || 
+      propertyData.address.includes("Pari Chowk") || 
+      propertyData.address.includes("Alpha")) {
+    locationMsg = "premium area with excellent connectivity";
+  } else if (propertyData.address.includes("Sector 12") || 
+             propertyData.address.includes("Knowledge Park")) {
+    locationMsg = "rapidly developing area close to educational institutions";
+  } else if (propertyData.address.includes("Sector 27") || 
+             propertyData.address.includes("Sector 37")) {
+    locationMsg = "well-established residential zone with good amenities";
+  } else {
+    locationMsg = "growing neighborhood in Greater Noida";
+  }
+  
+  // Determine size-based message
+  let sizeMsg = "";
+  if (propertyData.size > 2000) {
+    sizeMsg = "spacious layout offering excellent value";
+  } else if (propertyData.size > 1500) {
+    sizeMsg = "comfortable size that appeals to families";
+  } else {
+    sizeMsg = "efficient use of space ideal for small families or investors";
+  }
+  
+  // Determine age-based message
+  let ageMsg = "";
+  if (propertyData.age === 0) {
+    ageMsg = "Being newly constructed, it offers modern amenities and requires minimal maintenance.";
+  } else if (propertyData.age <= 3) {
+    ageMsg = "As a relatively new property, it combines modern features with established surroundings.";
+  } else if (propertyData.age <= 8) {
+    ageMsg = "The property's age represents a good balance between established infrastructure and modern design.";
+  } else {
+    ageMsg = "Consider budgeting for some renovations to maintain competitive value in this established property.";
+  }
+  
+  // Create insights
+  return `This property is located in a ${locationMsg} with ${sizeMsg}. ${ageMsg} Investment potential is strong with projected annual appreciation of 5-7% based on Greater Noida market trends. Recommendation: Hold for at least 3-5 years to maximize ROI.`;
+}
+
+
+
+
+
